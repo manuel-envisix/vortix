@@ -1,0 +1,35 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.research/
+.local/
+.env
+.env.*
+!.env.example
+synvix.tenants.json
+
+# Local credentials and runtime storage
+synvix.tenants.*.json
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Logs, tests, and tooling caches
+*.log
+npm-debug.log*
+coverage/
+.cache/
+.vite/
+*.tsbuildinfo
+
+# Machine-specific editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

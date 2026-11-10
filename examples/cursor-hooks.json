@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [{"command":"node scripts/cursor-hook.mjs beforeSubmitPrompt","timeout":2}],
+    "preToolUse": [{"command":"node scripts/cursor-hook.mjs preToolUse","timeout":2}],
+    "postToolUse": [{"command":"node scripts/cursor-hook.mjs postToolUse","timeout":2}],
+    "postToolUseFailure": [{"command":"node scripts/cursor-hook.mjs postToolUseFailure","timeout":2}],
+    "afterFileEdit": [{"command":"node scripts/cursor-hook.mjs afterFileEdit","timeout":2}],
+    "subagentStart": [{"command":"node scripts/cursor-hook.mjs subagentStart","timeout":2}],
+    "subagentStop": [{"command":"node scripts/cursor-hook.mjs subagentStop","timeout":2}],
+    "stop": [{"command":"node scripts/cursor-hook.mjs stop","timeout":2}]
+  }
+}

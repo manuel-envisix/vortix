@@ -1,0 +1,11 @@
+{
+  "event_id": "example-replace-with-unique-id",
+  "agent_id": "your-stable-bot-id",
+  "session_id": "your-session-id",
+  "run_id": "your-task-run-id",
+  "event_type": "agent.started",
+  "timestamp": "2026-11-10T12:00:00Z",
+  "name": "Your Grok Bot",
+  "repository": "your-org/your-repo",
+  "status": "working"
+}
