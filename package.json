@@ -6,11 +6,12 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
-    "test": "tsx --test src/simulation.test.ts server/*.test.ts",
+    "test": "tsx --test src/*.test.ts server/*.test.ts",
     "preview": "vite preview --host 127.0.0.1 --port 5173 --strictPort",
     "server": "node --env-file-if-exists=.env --import tsx server/index.ts",
     "start": "node --env-file-if-exists=.env --import tsx server/index.ts",
-    "check:server": "tsc -p tsconfig.server.json"
+    "check:server": "tsc -p tsconfig.server.json",
+    "open:chrome": "node scripts/open-chrome.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",

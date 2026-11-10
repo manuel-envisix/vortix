@@ -13,9 +13,13 @@ import { CursorCloudAdapter,GitHubAdapter,apiJson,ProviderError,parseSse,matches
 import { GrokBotAdapter,ingestCursorHook,ingestOtlp } from './ingestion';
 import { createApp,verifySignature } from './app';
 import type { Config,Tenant } from './config';
+import { issueViewerCookie,verifyViewerCookie } from './viewer-auth';
 const tenant:Tenant={id:'alpha',viewToken:'alpha-view-token-000000000',ingestToken:'alpha-ingest-token-000000',repositories:['envisix/test'],githubSecret:'github-test-secret'};
 const event=(patch:Partial<AgentEvent>={}):AgentEvent=>({event_id:'evt-1',provider:'grok_bot',agent_id:'bot-1',event_type:'agent.started',timestamp:'2026-11-10T12:00:00Z',source:'grok_report',confidence:'reported',repository:'envisix/test',...patch});
 test('schema strips private fields and validates bounded identifiers',()=>{const e=eventSchema.parse({...event(),prompt:'SECRET',tool_output:'SECRET',environment:{key:'SECRET'}});assert.ok(!JSON.stringify(e).includes('SECRET'));assert.throws(()=>eventSchema.parse(event({agent_id:'x'.repeat(300)})));});
+test('viewer sign-in survives restarts but rejects expiry, tampering, other ports and key rotation',()=>{
+ const now=Date.now(),cookie=issueViewerCookie(tenant,4310,now);assert.equal(verifyViewerCookie(cookie,[{...tenant}],4310,now+1000)?.id,tenant.id);assert.equal(verifyViewerCookie(cookie,[tenant],4311,now+1000),undefined);assert.equal(verifyViewerCookie(cookie,[tenant],4310,now+9*3600000),undefined);assert.equal(verifyViewerCookie(cookie+'0',[tenant],4310,now+1000),undefined);assert.equal(verifyViewerCookie(cookie,[{...tenant,viewToken:'rotated-viewer-key-000000'}],4310,now+1000),undefined);
+});
 test('unconfigured hook bridge returns neutral protocol without leaking input',()=>{
  for(const name of ['preToolUse','subagentStart','beforeSubmitPrompt','postToolUse']){const result=spawnSync(process.execPath,['scripts/cursor-hook.mjs',name],{input:JSON.stringify({conversation_id:'test',prompt:'SECRET',tool_input:{secret:'SECRET'}}),encoding:'utf8',windowsHide:true,env:{...process.env,SYNVIX_INGEST_URL:'',SYNVIX_INGEST_TOKEN:''}});assert.equal(result.status,0);const output=JSON.parse(result.stdout);assert.ok(!result.stdout.includes('SECRET'));if(name==='preToolUse'||name==='subagentStart')assert.equal(output.permission,'allow');else if(name==='beforeSubmitPrompt')assert.equal(output.continue,true);else assert.deepEqual(output,{});}
 });
@@ -60,6 +64,11 @@ test('Cursor run streaming keeps tool failures and drops reasoning, arguments an
   const events=s.events('alpha');assert.ok(events.some(e=>e.event_type==='tool.failed'));assert.ok(!JSON.stringify(events).includes('SECRET'));assert.equal(s.agent('alpha','cursor_cloud:bc-stream')!.status,'complete');assert.equal(s.agent('alpha','cursor_cloud:bc-stream')!.tools['call-1'].state,'failed');assert.equal(s.cursor('alpha','cursor-stream:bc-stream:r1'),'t3');
  }finally{adapter?.stop();s.close();}
 });
+test('archived Cursor agents leave the live roster but retain history',async()=>{
+ const s=new Store(':memory:');s.ingest('alpha',event({provider:'cursor_cloud',agent_id:'bc-archived',event_id:'old-history',source:'cursor_api',confidence:'observed'}));let empty=false;const requests:string[]=[];
+ const fetcher:typeof fetch=async(input)=>{const u=new URL(String(input));requests.push(u.pathname+u.search);if(u.pathname==='/v1/agents'){assert.equal(u.searchParams.get('includeArchived'),'false');return Response.json({items:empty?[]:[{id:'bc-current',status:'IDLE'},{id:'bc-archived',status:'ARCHIVED'}]});}if(u.pathname.endsWith('/runs'))return Response.json({items:[]});if(u.pathname.endsWith('/runs/r1'))return Response.json({id:'r1',status:'FINISHED',updatedAt:'2026-11-10T12:00:00Z'});return Response.json({id:'bc-current',status:'IDLE',latestRunId:'r1'});};
+ try{const adapter=new CursorCloudAdapter({...tenant,cursorKey:'test-key'},s,{maxAgents:100,maxStreams:0},fetcher);await adapter.poll();assert.deepEqual(s.snapshot('alpha').agents.map(a=>a.externalId),['bc-current']);assert.ok(!s.snapshot('alpha').events.some(e=>e.agentId==='cursor_cloud:bc-archived'));assert.ok(s.events('alpha').some(e=>e.agent_id==='bc-archived'));assert.ok(!requests.some(u=>u.includes('/bc-archived')));empty=true;await adapter.poll();assert.equal(s.snapshot('alpha').agents.length,0);assert.ok(s.agents('alpha').length>0);}finally{s.close();}
+});
 test('GitHub REST enrichment persists PR reviews and CI job/step results',async()=>{
  const s=new Store(':memory:');s.ingest('alpha',event({pr_url:'https://github.com/envisix/test/pull/2',branch:'feature'}));
  const fetcher:typeof fetch=async(input)=>{const u=new URL(String(input));let data:any={};
@@ -85,6 +94,9 @@ test('failed CI and unknown delivery remain distinct from task completion',()=>{
 test('updating telemetry preserves fleet insertion order and therefore stable world layout',()=>{
  const s=new Store(':memory:');try{s.ingest('alpha',event());s.ingest('alpha',event({agent_id:'bot-2',event_id:'second'}));const initial=s.snapshot('alpha').agents.map(a=>a.id);s.ingest('alpha',event({event_id:'update',event_type:'agent.waiting',timestamp:'2026-11-10T12:01:00Z'}));assert.deepEqual(s.snapshot('alpha').agents.map(a=>a.id),initial);}finally{s.close();}
 });
+test('inspector history returns latest events scoped to both provider and agent',()=>{
+ const s=new Store(':memory:');try{for(let i=0;i<8;i++)s.ingest('alpha',event({event_id:'event-'+i}));s.ingest('alpha',event({event_id:'other-provider',provider:'cursor_cloud',source:'cursor_api'}));const latest=s.events('alpha',0,3,{agent:'bot-1',provider:'grok_bot',latest:true});assert.deepEqual(latest.map(e=>e.event_id),['event-5','event-6','event-7']);assert.ok(latest.every(e=>e.provider==='grok_bot'));}finally{s.close();}
+});
 test('resumed agents do not retain an obsolete waiting activity',()=>{
  let a=reduceAgent(undefined,event({event_type:'agent.waiting'}));a=reduceAgent(a,event({event_type:'agent.resumed',timestamp:'2026-11-10T12:01:00Z'}));assert.equal(a.status,'working');assert.equal(a.activity,null);
 });
@@ -99,6 +111,8 @@ test('HTTP and WebSocket auth, tenant isolation, recovery, MCP, and signed webho
   assert.equal((await fetch(base+'/api/snapshot',{headers:{Authorization:`Bearer ${tenant.viewToken}`,Origin:'http://evil.test'}})).status,403);
   const ingest=await fetch(base+'/api/grok/report',{method:'POST',headers:{Authorization:`Bearer ${tenant.ingestToken}`,'Content-Type':'application/json'},body:JSON.stringify(event())});assert.equal(ingest.status,202);
   const login=await fetch(base+'/api/session',{method:'POST',headers:{Authorization:`Bearer ${tenant.viewToken}`}});const cookie=login.headers.get('set-cookie')!.split(';')[0];
+  const browserLogin=await fetch(base+'/api/browser-login',{method:'POST',headers:{Authorization:`Bearer ${tenant.viewToken}`}}).then(r=>r.json());assert.ok(browserLogin.code);assert.ok(!JSON.stringify(browserLogin).includes(tenant.viewToken));
+  const redeem=await fetch(base+'/api/browser-login?code='+browserLogin.code,{redirect:'manual'});assert.equal(redeem.status,303);assert.equal(redeem.headers.get('location'),'/?mode=live');const browserCookie=redeem.headers.get('set-cookie')!.split(';')[0];assert.equal((await fetch(base+'/api/snapshot',{headers:{Cookie:browserCookie}})).status,200);assert.equal((await fetch(base+'/api/browser-login?code='+browserLogin.code,{redirect:'manual'})).status,401);
   const betaSnapshot=await fetch(base+'/api/snapshot?tenant=alpha',{headers:{Authorization:`Bearer ${beta.viewToken}`}}).then(r=>r.json());assert.equal(betaSnapshot.agents.length,0);
   ws=new WebSocket(base.replace('http:','ws:')+'/api/ws',{headers:{Cookie:cookie,Origin:'http://allowed.test'}});const first=await once(ws,'message');assert.equal(JSON.parse(first[0].toString()).snapshot.agents.length,1);
   ws.send(JSON.stringify({type:'subscribe',after:0,tenant:'beta'}));const recovery=await once(ws,'message');assert.equal(JSON.parse(recovery[0].toString()).events[0].agent_id,'bot-1');

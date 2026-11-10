@@ -16,6 +16,10 @@ With no viewer/ingestion tokens, the service starts with zero tenants. `/api/hea
 
 The live UI displays up to 100 agents to preserve its rendering budget. The backend retains all ingested agents and event history. Cursor discovery is bounded by `SYNVIX_MAX_AGENTS` (default 100). No agent amount control is added to the UI.
 
+### Open in Chrome
+
+With the backend running, execute `npm run open:chrome` from this project. It opens a visible Chrome window through a one-use, 60-second server sign-in link, without printing tokens or passing long-lived viewer/provider keys to Chrome. The server sets the viewer cookie before redirecting to the live page. Chrome has its own viewer cookie; the in-app browser session is separate. Once signed in, bookmark `http://127.0.0.1:4310/?mode=live`. Viewer cookies are signed and survive backend restarts while the viewer key remains unchanged; run the launcher again after the eight-hour session expires or the key is rotated.
+
 ## What you need to provide
 
 | Connection | Required configuration | Optional / limitations |
@@ -29,7 +33,7 @@ No cloud deployment or public exposure is performed by setup. Put an authenticat
 
 ### Cursor Cloud
 
-The adapter discovers existing agents, including those created outside this dashboard **if returned by the authenticated account's API**. It paginates `GET /v1/agents`, reads durable details, run state and a bounded initial run history. New agents are discovered on reconciliation (default 30 seconds). Polling is sequential per connector with bounded request concurrency and exponential backoff, honoring Retry-After / GitHub reset headers. Failures leave last-known state intact and are visible in `/api/connectors`.
+The adapter discovers existing agents, including those created outside this dashboard **if returned by the authenticated account's API**. It paginates `GET /v1/agents`, reads durable details, run state and a bounded initial run history. Archived agents are excluded using includeArchived=false and a persisted live-roster filter. Previously imported archived agents disappear from the galaxy and feed, while their history remains available through replay. New agents are discovered on reconciliation (default 30 seconds). Polling is sequential per connector with bounded request concurrency and exponential backoff, honoring Retry-After / GitHub reset headers. Failures leave last-known state intact and are visible in `/api/connectors`.
 
 Run SSE is metadata-only: tool identity, tool lifecycle and run state; assistant and thinking text, tool arguments, full outputs and final response content are discarded. A persisted Last-Event-ID resumes each monitored run. An expired stream falls back to run reconciliation. Unknown tools do not become “coding” by default. Activity classified from a tool name is **inferred**, while the underlying tool execution and run status remain **observed**.
 
@@ -74,7 +78,9 @@ The strict event allowlist is in `server/events.ts`. Required: event_id, provide
 | Endpoint | Authorization | Purpose |
 |---|---|---|
 | `GET /api/health` | Public | Service readiness and whether any tenants are configured; no secrets |
-| `POST /api/session` | Viewer Bearer | Obtain HttpOnly browser session |
+| `POST /api/session` | Viewer Bearer | Obtain signed HttpOnly browser session |
+| `POST /api/browser-login` | Viewer Bearer | Issue a one-use browser sign-in code, valid for 60 seconds |
+| `GET /api/browser-login?code=…` | One-use code | Set viewer cookie and redirect to the live page |
 | `GET /api/snapshot` | Viewer/session | Current live state and recent events |
 | `GET /api/events?after=0&limit=1000&agent=external-id&run=run-id` | Viewer/session | Persistent, tenant-scoped metadata history; filters optional |
 | `GET /api/replay` | Viewer/session | Same event replay contract |
@@ -88,7 +94,7 @@ The strict event allowlist is in `server/events.ts`. Required: event_id, provide
 | `POST /api/otlp/v1/traces` and `/logs` | Ingestion Bearer | OTLP HTTP JSON metadata; at most 1000 spans, no gRPC/protobuf/gzip |
 | `POST /api/webhooks/github/:tenant` | HMAC signature | GitHub evidence |
 
-WebSocket connect sends `{ "type": "snapshot", "snapshot": ... }`. To recover raw missed events, send `{ "type": "subscribe", "after": 123 }`; the response includes `recovery.events`, cursor and `more`, followed by a current snapshot. Page `/api/events` until caught up if `more` is true. The frontend consumes current snapshots and retains the last 60 events; full history is in SQLite/replay. Slow clients over 1 MiB of queued data are disconnected and can reconnect. Sessions expire; reconnect with the viewer-token URL if needed.
+WebSocket connect sends `{ "type": "snapshot", "snapshot": ... }`. To recover raw missed events, send `{ "type": "subscribe", "after": 123 }`; the response includes `recovery.events`, cursor and `more`, followed by a current snapshot. Page `/api/events` until caught up if `more` is true. The frontend consumes current snapshots and retains the last 60 events; full history is in SQLite/replay. Slow clients over 1 MiB of queued data are disconnected and can reconnect. Signed viewer sessions survive restarts and expire after eight hours; reconnect with the Chrome launcher or viewer-token URL if needed.
 
 SQLite WAL stores sanitized events, current materialized state, stable project IDs and resume cursors. Both event insertion and state updates commit atomically. Out-of-order events remain in history but do not regress newer execution state. Delivery updates have separate ordering from run state. Completed agents are retained. Back up `.local/synvix.sqlite` using SQLite-aware backup procedures; include WAL files if copying an active database. Credentials are not stored in it.
 

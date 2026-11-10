@@ -3,6 +3,7 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { Html, OrbitControls, Stars } from '@react-three/drei';
 import * as THREE from 'three';
 import { projects as demoProjects, deliveryStatus, type Agent, type Project } from './simulation';
+import { refreshAgentHitBounds } from './agentPicking';
 
 export type Focus = { agentId?: string; projectId?: number; key: number };
 type Position = [number, number, number];
@@ -118,6 +119,7 @@ function Fleet({ agents, layout, selected, onSelect, reduced }: { agents: Agent[
       telemetry.setXYZW(i, a.status === 'complete' ? 6 : a.activityKnown===false?16:Object.keys(symbols).indexOf(a.activity), ['draft','open','merged','closed','unknown'].indexOf(status.pr), status.ci==='passed'?1:status.ci==='failed'?2:status.ci==='unknown'?3:0, a.id === selected ? 1 : 0);
     });
     mesh.current.count = agents.length; mesh.current.instanceMatrix.needsUpdate = true; telemetry.needsUpdate = true; signals.needsUpdate = true;
+    refreshAgentHitBounds(mesh.current);
   }, [agents, layout, selected, resources]);
   useFrame(() => {
     if (!mesh.current || transform.last.equals(camera.quaternion)) return;
@@ -125,7 +127,7 @@ function Fleet({ agents, layout, selected, onSelect, reduced }: { agents: Agent[
     agents.forEach((a,i) => { transform.position.set(...layout.positions.get(a.id)!); transform.matrix.compose(transform.position,camera.quaternion,transform.scale); mesh.current!.setMatrixAt(i,transform.matrix); });
     mesh.current.instanceMatrix.needsUpdate = true;
   });
-  return <instancedMesh ref={mesh} args={[resources.geometry, resources.material, 100]} dispose={null} frustumCulled={false} onClick={e => { e.stopPropagation(); if (e.instanceId !== undefined) onSelect(agents[e.instanceId].id); }} />;
+  return <instancedMesh ref={mesh} args={[resources.geometry, resources.material, 100]} dispose={null} frustumCulled={false} onPointerOver={()=>{document.body.style.cursor='pointer';}} onPointerOut={()=>{document.body.style.cursor='';}} onClick={e => { if(e.delta>5)return;e.stopPropagation(); if (e.instanceId !== undefined&&agents[e.instanceId]) onSelect(agents[e.instanceId].id); }} />;
 }
 
 // Budget background animation to 30 Hz. Camera interactions can request extra frames.

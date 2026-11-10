@@ -26,10 +26,16 @@ export class CursorCloudAdapter {
   async poll(){
     if(!this.tenant.cursorKey)return;
     const agents:any[]=[];let cursor:string|undefined;const seen=new Set<string>();
-    do{const page=await apiJson(`${this.base}/v1/agents?limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`,this.headers(),this.fetcher);if(!Array.isArray(page.items))throw Error('Invalid Cursor list response');agents.push(...page.items);cursor=page.nextCursor;if(cursor&&seen.has(cursor))throw Error('Repeated Cursor pagination cursor');if(cursor)seen.add(cursor);}while(cursor&&agents.length<this.config.maxAgents);
+    do{const page=await apiJson(`${this.base}/v1/agents?limit=100&includeArchived=false${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`,this.headers(),this.fetcher);if(!Array.isArray(page.items))throw Error('Invalid Cursor list response');agents.push(...page.items.filter((a:any)=>a.status!=='ARCHIVED'));cursor=page.nextCursor;if(cursor&&seen.has(cursor))throw Error('Repeated Cursor pagination cursor');if(cursor)seen.add(cursor);}while(cursor&&agents.length<this.config.maxAgents);
     const pending=agents.slice(0,this.config.maxAgents);let offset=0;const active=new Set<string>();
+    this.store.cursor(this.tenant.id,'cursor-visible-agents',JSON.stringify(pending.map(a=>a.id)));
+    this.store.emit('change',this.tenant.id);
+    for(const [key,controller]of this.streams)if(!pending.some(a=>key.startsWith(a.id+'/')))controller.abort();
     const workers=await Promise.allSettled(Array.from({length:Math.min(3,pending.length)},async()=>{while(offset<pending.length){const item=pending[offset++];
       const detail=await apiJson(`${this.base}/v1/agents/${encodeURIComponent(item.id)}`,this.headers(),this.fetcher);
+      if(detail.status==='ARCHIVED'){
+        const visible=JSON.parse(this.store.cursor(this.tenant.id,'cursor-visible-agents')??'[]');this.store.cursor(this.tenant.id,'cursor-visible-agents',JSON.stringify(visible.filter((id:string)=>id!==detail.id)));this.store.emit('change',this.tenant.id);continue;
+      }
       let run:any;if(detail.latestRunId)run=await apiJson(`${this.base}/v1/agents/${encodeURIComponent(item.id)}/runs/${encodeURIComponent(detail.latestRunId)}`,this.headers(),this.fetcher);
       else {const page=await apiJson(`${this.base}/v1/agents/${encodeURIComponent(item.id)}/runs?limit=1`,this.headers(),this.fetcher);run=page.items?.[0];}
       const branches=run?.git?.branches??[],repoUrl=detail.repos?.[0]?.url??branches[0]?.repoUrl;

@@ -9,6 +9,7 @@ import { eventSchema } from './events';
 import { CursorCloudAdapter, GitHubAdapter, ProviderError, type Diagnostic } from './providers';
 import { GrokBotAdapter, ingestCursorHook, ingestOtlp } from './ingestion';
 import type { Config, Tenant } from './config';
+import { issueViewerCookie,verifyViewerCookie } from './viewer-auth';
 
 const equal=(a:string,b:string)=>timingSafeEqual(createHash('sha256').update(a).digest(),createHash('sha256').update(b).digest());
 export function verifySignature(body:Buffer,secret:string,signature:string|undefined){const expected=`sha256=${createHmac('sha256',secret).update(body).digest('hex')}`;return !!signature&&equal(signature,expected);}
@@ -16,12 +17,13 @@ const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text
 async function body(req:http.IncomingMessage,max=65536){const chunks:Buffer[]=[];let length=0;for await(const chunk of req){length+=chunk.length;if(length>max)throw Object.assign(Error('Payload too large'),{status:413});chunks.push(chunk);}return Buffer.concat(chunks);}
 function json(res:http.ServerResponse,status:number,data:unknown){res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}).end(JSON.stringify(data));}
 export function createApp(config:Config,store:Store,options:{poll?:boolean;fetcher?:typeof fetch;webRoot?:string}={}){
-  const sessions=new Map<string,{tenant:Tenant;expires:number}>(),dirty=new Set<string>(),timers:NodeJS.Timeout[]=[];
+  const browserLogins=new Map<string,{tenant:Tenant;expires:number}>(),dirty=new Set<string>(),timers:NodeJS.Timeout[]=[];
   const throttles=new Map<string,{start:number;count:number}>();let stopped=false;
   const providers=config.tenants.map(tenant=>({tenant,cursor:new CursorCloudAdapter(tenant,store,config,options.fetcher),github:new GitHubAdapter(tenant,store,options.fetcher)}));
   const originAllowed=(req:http.IncomingMessage)=>!req.headers.origin||config.allowedOrigins.includes(req.headers.origin);
   function bearer(req:http.IncomingMessage,scope:'view'|'ingest') {const token=req.headers.authorization?.replace(/^Bearer /,'');return token?config.tenants.find(t=>equal(token,scope==='view'?t.viewToken:t.ingestToken)):undefined;}
-  function viewer(req:http.IncomingMessage){const token=/synvix_session=([a-f0-9]+)/.exec(req.headers.cookie??'')?.[1],session=token?sessions.get(token):undefined;if(session&&session.expires>Date.now())return session.tenant;return bearer(req,'view');}
+  function viewer(req:http.IncomingMessage){const cookie=/(?:^|;\s*)synvix_session=([^;]+)/.exec(req.headers.cookie??'')?.[1];return (cookie?verifyViewerCookie(cookie,config.tenants,config.port):undefined)??bearer(req,'view');}
+  function setViewerCookie(req:http.IncomingMessage,res:http.ServerResponse,tenant:Tenant){res.setHeader('Set-Cookie',`synvix_session=${issueViewerCookie(tenant,config.port)}; HttpOnly; SameSite=Strict; Path=/api; Max-Age=28800${req.headers['x-forwarded-proto']==='https'?'; Secure':''}`);}
   const root=path.resolve(options.webRoot??'dist');
   const server=http.createServer(async(req,res)=>{
     const url=new URL(req.url??'/','http://localhost');
@@ -38,8 +40,16 @@ export function createApp(config:Config,store:Store,options:{poll?:boolean;fetch
       const throttleKey=`${req.socket.remoteAddress}:${url.pathname}`;let throttle=throttles.get(throttleKey);if(!throttle||Date.now()-throttle.start>60000){throttle={start:Date.now(),count:0};throttles.set(throttleKey,throttle);}if(++throttle.count>2400){res.setHeader('Retry-After','60');return json(res,429,{error:'Rate limited'});}if(throttles.size>1000)throttles.delete(throttles.keys().next().value!);
       if(req.method==='POST'&&url.pathname==='/api/session'){
         const tenant=bearer(req,'view');if(!tenant)return json(res,401,{error:'Viewer token required'});
-        const token=randomBytes(32).toString('hex');if(sessions.size>=1000)sessions.delete(sessions.keys().next().value!);sessions.set(token,{tenant,expires:Date.now()+8*3600000});
-        res.setHeader('Set-Cookie',`synvix_session=${token}; HttpOnly; SameSite=Strict; Path=/api; Max-Age=28800${req.headers['x-forwarded-proto']==='https'?'; Secure':''}`);return json(res,200,{tenant:tenant.id});
+        setViewerCookie(req,res,tenant);return json(res,200,{tenant:tenant.id});
+      }
+      if(req.method==='POST'&&url.pathname==='/api/browser-login'){
+        const tenant=bearer(req,'view');if(!tenant)return json(res,401,{error:'Viewer token required'});
+        const code=randomBytes(32).toString('hex');if(browserLogins.size>=1000)browserLogins.delete(browserLogins.keys().next().value!);browserLogins.set(code,{tenant,expires:Date.now()+60000});return json(res,200,{code,expiresIn:60});
+      }
+      if(req.method==='GET'&&url.pathname==='/api/browser-login'){
+        const code=url.searchParams.get('code')??'',login=browserLogins.get(code);browserLogins.delete(code);
+        if(!login||login.expires<Date.now())return json(res,401,{error:'Browser sign-in link expired. Run npm run open:chrome again.'});
+        setViewerCookie(req,res,login.tenant);res.writeHead(303,{Location:'/?mode=live','Cache-Control':'no-store'}).end();return;
       }
       const webhook=/^\/api\/webhooks\/github\/([\w-]+)$/.exec(url.pathname);
       if(webhook&&req.method==='POST'){
@@ -56,7 +66,7 @@ export function createApp(config:Config,store:Store,options:{poll?:boolean;fetch
         if(url.pathname==='/api/events'||url.pathname==='/api/replay'){
           const after=Math.max(0,Number(url.searchParams.get('after')??0)),limit=Math.min(1000,Math.max(1,Number(url.searchParams.get('limit')??1000)));
           if(!Number.isSafeInteger(after)||!Number.isSafeInteger(limit))return json(res,422,{error:'Invalid cursor'});
-          const events=store.events(tenant.id,after,limit,{agent:url.searchParams.get('agent')??undefined,run:url.searchParams.get('run')??undefined});return json(res,200,{events,cursor:events.at(-1)?.seq??after,latest:store.lastSeq(tenant.id)});
+          const events=store.events(tenant.id,after,limit,{agent:url.searchParams.get('agent')??undefined,run:url.searchParams.get('run')??undefined,provider:url.searchParams.get('provider')??undefined,latest:url.searchParams.get('latest')==='true'});return json(res,200,{events,cursor:events.at(-1)?.seq??after,latest:store.lastSeq(tenant.id)});
         }
         if(url.pathname==='/api/connectors'){const p=providers.find(p=>p.tenant.id===tenant.id)!;return json(res,200,{tenant:tenant.id,connectors:[p.cursor.diagnostic,p.github.diagnostic,{provider:'grok_bot',configured:true,state:'idle',mode:'reported_events_only'}]});}
         if(url.pathname==='/api/mcp')return json(res,405,{error:'Stateless MCP uses POST'});
@@ -103,7 +113,7 @@ export function createApp(config:Config,store:Store,options:{poll?:boolean;fetch
   });
   const changed=(tenant:string)=>dirty.add(tenant);store.on('change',changed);
   timers.push(setInterval(()=>{for(const tenant of dirty){const payload=JSON.stringify({type:'snapshot',snapshot:store.snapshot(tenant)});for(const [ws,client]of clients)if(client.tenant.id===tenant&&ws.readyState===WebSocket.OPEN){if(ws.bufferedAmount>1024*1024)ws.terminate();else ws.send(payload);}}dirty.clear();},500));
-  timers.push(setInterval(()=>{for(const [ws,c]of clients){if(!c.alive||c.expires<Date.now())ws.terminate();else {c.alive=false;ws.ping();}}for(const [token,s]of sessions)if(s.expires<Date.now())sessions.delete(token);},15000));
+  timers.push(setInterval(()=>{for(const [ws,c]of clients){if(!c.alive||c.expires<Date.now())ws.terminate();else {c.alive=false;ws.ping();}}for(const [code,s]of browserLogins)if(s.expires<Date.now())browserLogins.delete(code);},15000));
   function schedule(adapter:{poll:()=>Promise<void>;diagnostic:Diagnostic},delay=0,failures=0){if(stopped)return;const timer=setTimeout(async()=>{pollTimers.delete(timer);try{await adapter.poll();adapter.diagnostic.nextRetryAt=undefined;schedule(adapter,config.pollMs);}catch(error){const retry=Math.max(config.pollMs*Math.min(16,2**failures),(error instanceof ProviderError?error.retryMs:0));adapter.diagnostic.state='error';adapter.diagnostic.lastError=error instanceof ProviderError?`HTTP_${error.status}`:'Connection or provider schema error';adapter.diagnostic.nextRetryAt=new Date(Date.now()+retry).toISOString();schedule(adapter,retry,failures+1);}},delay);timer.unref();pollTimers.add(timer);}
   const pollTimers=new Set<NodeJS.Timeout>();if(options.poll!==false)for(const p of providers){if(p.tenant.cursorKey)schedule(p.cursor);if(p.tenant.githubToken)schedule(p.github);}
   return {server,providers,async close(){stopped=true;store.off('change',changed);for(const t of [...timers,...pollTimers])clearTimeout(t);for(const p of providers)p.cursor.stop();for(const ws of clients.keys())ws.terminate();await new Promise<void>(resolve=>wss.close(()=>resolve()));if(server.listening)await new Promise<void>(resolve=>server.close(()=>resolve()));}};
